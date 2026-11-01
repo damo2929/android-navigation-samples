@@ -20,6 +20,8 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
@@ -30,6 +32,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import com.example.navigationapidemo.CustomizationPanelsDelegate.logDebugInfo
 import com.example.navigationapidemo.EdgeToEdgeUtil.EdgeToEdgeMarginConfig
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.GoogleMap
+import com.google.android.gms.maps.model.FollowMyLocationOptions
 import com.google.android.libraries.navigation.NavigationApi
 import com.google.android.libraries.navigation.NavigationApi.NavigatorListener
 import com.google.android.libraries.navigation.NavigationView
@@ -172,6 +177,9 @@ class NavViewActivity : AppCompatActivity() {
         this@NavViewActivity,
         navView::addOnNavigationUiChangedListener,
       )
+
+      // Issue 578578614: free-drive follow zoom and traffic (see ISSUE-578578614.md).
+      startZoomRepro(map)
     }
   }
 
@@ -253,6 +261,69 @@ class NavViewActivity : AppCompatActivity() {
           else -> showToast("Error starting guidance: $code")
         }
       }
+    }
+  }
+
+  /**
+   * Issue 578578614 (see ISSUE-578578614.md): free drive (no destination), road map, traffic on.
+   * Logs the camera every second under the tag "b578578614" and runs one step every 15 s.
+   */
+  @SuppressLint("MissingPermission")
+  private fun startZoomRepro(map: GoogleMap) {
+    val tag = "b578578614"
+    val handler = Handler(Looper.getMainLooper())
+    map.isTrafficEnabled = true
+    map.mapType = GoogleMap.MAP_TYPE_NORMAL
+    handler.post(
+      object : Runnable {
+        override fun run() {
+          val c = map.cameraPosition
+          Log.i(
+            tag,
+            "zoom=%.2f bearing=%.0f tilt=%.0f following=%b mapType=%d"
+              .format(c.zoom, c.bearing, c.tilt, map.isCameraFollowingMyLocation, map.mapType),
+          )
+          handler.postDelayed(this, 1_000)
+        }
+      }
+    )
+    val tilted = GoogleMap.CameraPerspective.TILTED
+    val steps =
+      listOf<Pair<String, () -> Unit>>(
+        "A followMyLocation(TILTED)" to { map.followMyLocation(tilted) },
+        "B min and max zoom preference 17, then follow" to
+          {
+            map.setMinZoomPreference(17f)
+            map.setMaxZoomPreference(17f)
+            map.followMyLocation(tilted)
+          },
+        "C reset preferences, animateCamera(zoomTo(17)) while following" to
+          {
+            map.resetMinMaxZoomPreference()
+            map.animateCamera(CameraUpdateFactory.zoomTo(17f))
+          },
+        "D followMyLocation(TILTED) again" to { map.followMyLocation(tilted) },
+        "E moveCamera(zoomTo(16)), then follow" to
+          {
+            map.moveCamera(CameraUpdateFactory.zoomTo(16f))
+            map.followMyLocation(tilted)
+          },
+        "F deprecated FollowMyLocationOptions, zoom 17" to
+          {
+            @Suppress("DEPRECATION")
+            map.followMyLocation(tilted, FollowMyLocationOptions.builder().setZoomLevel(17f).build())
+          },
+        "G followMyLocation(TILTED) without options" to { map.followMyLocation(tilted) },
+        "H MAP_TYPE_HYBRID at the same zoom" to { map.mapType = GoogleMap.MAP_TYPE_HYBRID },
+      )
+    steps.forEachIndexed { i, (name, step) ->
+      handler.postDelayed(
+        {
+          Log.i(tag, "step $name")
+          step()
+        },
+        15_000L * (i + 1),
+      )
     }
   }
 
